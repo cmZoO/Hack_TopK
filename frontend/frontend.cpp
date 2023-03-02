@@ -22,6 +22,8 @@ string address = "127.0.0.1";
 int dim = 1000000;
 int topk = 10;
 int bw_x = 24;
+float alpha = 0.01;
+int app = 0;
 
 uint64_t mask_x = (bw_x == 64 ? -1 : ((1ULL << bw_x) - 1));
 
@@ -32,7 +34,6 @@ MathFunctions* math;
 bool compare(int32_t a, int32_t b) {
     return a > b;
 }
-
 
 void init(uint64_t* a_share, uint64_t* b_share, uint64_t block_cnt, uint64_t block_a_len, uint64_t block_b_len) {
     uint64_t* sub_share = new uint64_t[block_a_len * block_cnt];
@@ -174,197 +175,11 @@ void cal_app_topk(uint64_t* x, uint64_t block_cnt, uint64_t* topk_res_share, int
     memcpy(topk_res_share, block_topk_share, topk * sizeof(uint64_t));
 }
 
-bool topk2(int argc, char** argv) {
-    assert(topk <= dim);
-    /************* Argument Parsing  ************/
-    /********************************************/
-    ArgMapping amap;
-    amap.arg("r", party, "Role of party: ALICE = 1; BOB = 2");
-    amap.arg("p", port, "Port Number");
-    amap.arg("N", dim, "Number of ReLU operations");
-    amap.arg("ip", address, "IP Address of server (ALICE)");
+void cal_topk(uint64_t* x, uint64_t* topk_value_share) {
 
-    amap.parse(argc, argv);
-
-    /********** Setup IO and Base OTs ***********/
-    /********************************************/
-    ioArr[0] = new sci::NetIO(party == 1 ? nullptr : address.c_str(), port);
-    otpackArr[0] = new OTPack<sci::NetIO>(ioArr[0], party);
-    std::cout << "All Base OTs Done" << std::endl;
-
-    /************ Generate Test Data ************/
-    /********************************************/
-    PRG128 prg;
-
-    uint64_t* x = new uint64_t[dim];
-    uint64_t* x_other = new uint64_t[dim];
-
-    int32_t magnitude_bound = 1ULL << (bw_x - 2);
-    prg.random_data(x, dim * sizeof(uint64_t));
-    prg.random_data(x_other, dim * sizeof(uint64_t));
-    if (party == sci::ALICE) {
-        for (int i = 0; i < dim; i++) {
-            x[i] = (int32_t)x[i] % magnitude_bound;
-        }
-        if (dim <= 16) {
-            cout << "生成数组:";
-            for (int i = 0; i < dim; i++) {
-                cout << (int32_t)x[i] << " ";
-            }
-        }
-
-        for (int i = 0; i < dim; i++) {
-            x[i] = uint64_t(x[i] - x_other[i]);
-        }
-        ioArr[0]->send_data(x_other, dim * sizeof(uint64_t));
-    }
-    else {
-        ioArr[0]->recv_data(x, dim * sizeof(uint64_t));
-    }
-    cout << endl;
-
-    /************** Calculate Topk ****************/
-       /********************************************/
-    std::cout << "Calculate Topk" << std::endl;
-    uint64_t thread_comm[1];
-    thread_comm[0] = ioArr[0]->counter;
-    math = new MathFunctions(party, ioArr[0], otpackArr[0]);
-    uint64_t* topk_res_share = new uint64_t[topk];
-    auto start = high_resolution_clock::now();
-
-    cal_app_topk(x, topk / 0.01, topk_res_share, dim);
-
-    long long t = std::chrono::duration_cast<std::chrono::microseconds>(high_resolution_clock::now() - start).count();
-
-    thread_comm[0] = ioArr[0]->counter - thread_comm[0];
-
-    /************** Verification ****************/
-    /********************************************/
-    if (party == sci::ALICE) {
-        uint64_t* topk_value_share_other = new uint64_t[topk];
-        ioArr[0]->recv_data(topk_value_share_other, topk * sizeof(uint64_t));
-        ioArr[0]->recv_data(x_other, dim * sizeof(uint64_t));
-        int32_t* signed_x = new int32_t[dim];
-        for (int i = 0; i < dim; i++) {
-            x[i] += x_other[i];
-            signed_x[i] = signed_val(x[i], bw_x);
-        }
-        if (dim <= 16) {
-            cout << "复原数组:";
-            for (int i = 0; i < dim; i++) {
-                cout << signed_x[i] << " ";
-            }
-            cout << endl;
-        }
-        // 排序原数组
-        sort(signed_x, signed_x + dim, compare);
-        if (dim <= 16) {
-            cout << "排序数组:";
-            for (int i = 0; i < dim; i++) {
-                cout << signed_x[i] << " ";
-            }
-            cout << endl;
-        }
-        cout << "Topk数组:";
-        for (int i = 0; i < topk; i++) {
-            int64_t argmax_value = signed_val(topk_res_share[i] + topk_value_share_other[i], bw_x);
-            cout << argmax_value << " ";
-            //assert(argmax_value == signed_x[i]);
-            if (argmax_value != signed_x[i]) {
-                return false;
-            }
-        }
-        cout << endl;
-
-        cout << "Topk Tests Passed" << endl;
-
-        delete[] topk_value_share_other;
-        delete[] signed_x;
-    }
-    else { // party == BOB
-        ioArr[0]->send_data(topk_res_share, topk * sizeof(uint64_t));
-        ioArr[0]->send_data(x, dim * sizeof(uint64_t));
-    }
-
-    /**** Process & Write Benchmarking Data *****/
-    /********************************************/
-    cout << "Number of Topk/s:\t" << (double(topk) / t) * 1e6 << std::endl;
-    cout << "Topk Time\t" << t / (1000.0) << " ms" << endl;
-    cout << "Topk Bytes Sent\t" << thread_comm[0] << " bytes" << endl;
-
-    /******************* Cleanup ****************/
-    /********************************************/
-    delete[] x;
-    delete[] x_other;
-    delete[] topk_res_share;
-    delete ioArr[0];
-    delete otpackArr[0];
-    delete math;
-
-    return true;
-}
-
-
-void topk3(int argc, char** argv) {
-    assert(topk <= dim);
-    /************* Argument Parsing  ************/
-    /********************************************/
-    ArgMapping amap;
-    amap.arg("r", party, "Role of party: ALICE = 1; BOB = 2");
-    amap.arg("p", port, "Port Number");
-    amap.arg("N", dim, "Number of ReLU operations");
-    amap.arg("ip", address, "IP Address of server (ALICE)");
-
-    amap.parse(argc, argv);
-
-    /********** Setup IO and Base OTs ***********/
-    /********************************************/
-    ioArr[0] = new sci::NetIO(party == 1 ? nullptr : address.c_str(), port);
-    otpackArr[0] = new OTPack<sci::NetIO>(ioArr[0], party);
-    std::cout << "All Base OTs Done" << std::endl;
-
-    /************ Generate Test Data ************/
-    /********************************************/
-    PRG128 prg;
-
-    uint64_t* x = new uint64_t[dim];
-    uint64_t* x_other = new uint64_t[dim];
-
-    int32_t magnitude_bound = 1ULL << (bw_x - 2);
-    prg.random_data(x, dim * sizeof(uint64_t));
-    prg.random_data(x_other, dim * sizeof(uint64_t));
-    if (party == sci::ALICE) {
-        for (int i = 0; i < dim; i++) {
-            x[i] = (int32_t)x[i] % magnitude_bound;
-        }
-        if (dim <= 16) {
-            cout << "生成数组:";
-            for (int i = 0; i < dim; i++) {
-                cout << (int32_t)x[i] << " ";
-            }
-        }
-
-        for (int i = 0; i < dim; i++) {
-            x[i] = uint64_t(x[i] - x_other[i]);
-        }
-        ioArr[0]->send_data(x_other, dim * sizeof(uint64_t));
-    }
-    else {
-        ioArr[0]->recv_data(x, dim * sizeof(uint64_t));
-    }
-    cout << endl;
-
-    /************** Calculate Topk ****************/
-       /********************************************/
-    std::cout << "Calculate Topk" << std::endl;
-    uint64_t thread_comm[1];
-    thread_comm[0] = ioArr[0]->counter;
-    auto start = high_resolution_clock::now();
-    math = new MathFunctions(party, ioArr[0], otpackArr[0]);
     uint32_t b_len = dim / 2, s_len = dim / 2 + dim % 2;
     uint64_t* b_share = new uint64_t[b_len], * b_tmp = new uint64_t[b_len];
     uint64_t* s_share = new uint64_t[s_len], * s_tmp = new uint64_t[s_len];;
-    uint64_t* topk_value_share = new uint64_t[dim];
     memcpy(b_share, x, b_len * sizeof(uint64_t));
     memcpy(s_share, x + b_len, s_len * sizeof(uint64_t));
     {
@@ -430,8 +245,79 @@ void topk3(int argc, char** argv) {
             topk_value_share[rank] = b_share[b_left_index++];
         }
     }
+
+    delete[] b_share;
+    delete[] s_share;
+    delete[] b_tmp;
+    delete[] s_tmp;
+}
+
+int main(int argc, char** argv) {
+
+    /************* Argument Parsing  ************/
+    /********************************************/
+    ArgMapping amap;
+    amap.arg("r", party, "Role of party: ALICE = 1; BOB = 2");
+    amap.arg("p", port, "Port Number");
+    amap.arg("N", dim, "Number of Array Element");
+    amap.arg("k", topk, "Topk of Array Element");
+    amap.arg("ip", address, "IP Address of server (ALICE)");
+    amap.arg("alpha", alpha, "alpha of app topk");
+    amap.arg("app", app, "0: run topk, 1: run app topk");
+
+    amap.parse(argc, argv);    
+
+    std::cout << "N: " << dim << " topk: " << topk << std::endl;
+    if (app) {
+        std::cout << "run app topk, alpha=" << alpha << std::endl;
+    }
+
+    /********** Setup IO and Base OTs ***********/
+    /********************************************/
+    ioArr[0] = new sci::NetIO(party == 1 ? nullptr : address.c_str(), port);
+    otpackArr[0] = new OTPack<sci::NetIO>(ioArr[0], party);
+    std::cout << "All Base OTs Done" << std::endl;  
+
+    /************ Generate Test Data ************/
+    /********************************************/
+    PRG128 prg;
+
+    uint64_t* x = new uint64_t[dim];
+    uint64_t* x_other = new uint64_t[dim];
+    int32_t magnitude_bound = 1ULL << (bw_x - 2);
+    prg.random_data(x, dim * sizeof(uint64_t));
+    prg.random_data(x_other, dim * sizeof(uint64_t));
+    if (party == sci::ALICE) {
+        for (int i = 0; i < dim; i++) {
+            x[i] = (int32_t)x[i] % magnitude_bound;
+        }
+        for (int i = 0; i < dim; i++) {
+            x[i] = uint64_t(x[i] - x_other[i]);
+        }
+        ioArr[0]->send_data(x_other, dim * sizeof(uint64_t));
+    }
+    else {
+        ioArr[0]->recv_data(x, dim * sizeof(uint64_t));
+    }
+    cout << endl;
+
+    /************** Calculate Topk ****************/
+       /********************************************/
+    std::cout << "Calculate Topk" << std::endl;
+    uint64_t thread_comm[1];
+    thread_comm[0] = ioArr[0]->counter;
+    auto start = high_resolution_clock::now();
+    math = new MathFunctions(party, ioArr[0], otpackArr[0]);
+
+    uint64_t* topk_value_share = new uint64_t[topk];
+
+    if (!app) {
+        cal_topk(x, topk_value_share);
+    } else {
+        cal_app_topk(x, topk / alpha, topk_value_share, dim);
+    }
+
     long long t = std::chrono::duration_cast<std::chrono::microseconds>(high_resolution_clock::now() - start).count();
-    
     thread_comm[0] = ioArr[0]->counter - thread_comm[0];
 
     /************** Verification ****************/
@@ -445,31 +331,24 @@ void topk3(int argc, char** argv) {
             x[i] += x_other[i];
             signed_x[i] = signed_val(x[i], bw_x);
         }
-        if (dim <= 16) {
-            cout << "复原数组:";
-            for (int i = 0; i < dim; i++) {
-                cout << signed_x[i] << " ";
-            }
-            cout << endl;
-        }
         // 排序原数组
         sort(signed_x, signed_x + dim, compare);
-        if (dim <= 16) {
-            cout << "排序数组:";
-            for (int i = 0; i < dim; i++) {
-                cout << signed_x[i] << " ";
-            }
-            cout << endl;
-        }
         cout << "Topk数组:";
+        int success = 0;
         for (int i = 0; i < topk; i++) {
             int64_t argmax_value = signed_val(topk_value_share[i] + topk_value_share_other[i], bw_x);
             cout << argmax_value << " ";
-            assert(argmax_value == signed_x[i]);
+            if (argmax_value == signed_x[i]) {
+                success++;
+            }
         }
         cout << endl;
 
-        cout << "Topk Tests Passed" << endl;
+        if (success == topk) {
+            cout << "Topk Tests Passed" << endl;
+        } else {
+            cout << "Topk Tests failed: " << success << "/" << topk << endl;
+        }
 
         delete[] topk_value_share_other;
         delete[] signed_x;
@@ -489,18 +368,10 @@ void topk3(int argc, char** argv) {
     /********************************************/
     delete[] x;
     delete[] x_other;
-    delete[] b_share;
     delete[] topk_value_share;
-    delete[] s_share;
     delete ioArr[0];
     delete otpackArr[0];
     delete math;
-}
-
-int main(int argc, char** argv) {
-
-    topk3(argc, argv);
-    //topk2(argc, argv);
-
+     
 	return 0;
 }

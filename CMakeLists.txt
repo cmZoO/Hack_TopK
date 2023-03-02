@@ -7,7 +7,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # 1: frontend use silentot 0: frontend use iknp
-set(USE_CHEETAH 0)
+set(USE_CHEETAH 1)
 
 
 add_compile_options(-fPIC)
